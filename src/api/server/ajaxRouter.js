@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import CezerinClient from 'cezerin-client';
 import serverSettings from './lib/settings';
 const ajaxRouter = express.Router();
+const Joi = require('@hapi/joi');
 
 const TOKEN_PAYLOAD = { email: 'store', scopes: ['admin'] };
 const STORE_ACCESS_TOKEN = jwt.sign(TOKEN_PAYLOAD, serverSettings.jwtSecretKey);
@@ -10,6 +11,18 @@ const STORE_ACCESS_TOKEN = jwt.sign(TOKEN_PAYLOAD, serverSettings.jwtSecretKey);
 const api = new CezerinClient({
 	apiBaseUrl: serverSettings.apiBaseUrl,
 	apiToken: STORE_ACCESS_TOKEN
+});
+
+// We'll want to move this to it's own schema folder eventually
+// but putting it here for visibility of fix review
+const cartPutSchema = Joi.object({
+	billing_address: Joi.object(),
+	shipping_address: Joi.object(),
+	email: Joi.string(),
+	mobile: Joi.string(),
+	payment_method_id: Joi.string(),
+	shipping_method_id: Joi.string(),
+	comments: Joi.string().allow('')
 });
 
 const DEFAULT_CACHE_CONTROL = 'public, max-age=60';
@@ -38,18 +51,15 @@ const getIP = req => {
 	return ip;
 };
 
-const getUserAgent = req => {
-	return req.get('user-agent');
-};
+const getUserAgent = req => req.get('user-agent');
 
 const getVariantFromProduct = (product, variantId) => {
 	if (product.variants && product.variants.length > 0) {
 		return product.variants.find(
 			variant => variant.id.toString() === variantId.toString()
 		);
-	} else {
-		return null;
 	}
+	return null;
 };
 
 const fillCartItemWithProductData = (products, cartItem) => {
@@ -73,7 +83,7 @@ const fillCartItemWithProductData = (products, cartItem) => {
 };
 
 const fillCartItems = cartResponse => {
-	let cart = cartResponse.json;
+	const cart = cartResponse.json;
 	if (cart && cart.items && cart.items.length > 0) {
 		const productIds = cart.items.map(item => item.product_id);
 		return api.products
@@ -89,13 +99,12 @@ const fillCartItems = cartResponse => {
 				cartResponse.json.items = newCartItem;
 				return cartResponse;
 			});
-	} else {
-		return Promise.resolve(cartResponse);
 	}
+	return Promise.resolve(cartResponse);
 };
 
 ajaxRouter.get('/products', (req, res, next) => {
-	let filter = req.query;
+	const filter = req.query;
 	filter.enabled = true;
 	api.products.list(filter).then(({ status, json }) => {
 		res
@@ -129,6 +138,7 @@ ajaxRouter.get('/cart', (req, res, next) => {
 	}
 });
 
+// Vulnerable function accepting malicious item
 ajaxRouter.post('/cart/items', (req, res, next) => {
 	const isHttps = req.protocol === 'https';
 	const CART_COOKIE_OPTIONS = getCartCookieOptions(isHttps);
@@ -143,7 +153,7 @@ ajaxRouter.post('/cart/items', (req, res, next) => {
 				res.status(status).send(json);
 			});
 	} else {
-		let orderDraft = {
+		const orderDraft = {
 			draft: true,
 			referrer_url: req.signedCookies.referrer_url,
 			landing_url: req.signedCookies.landing_url,
@@ -200,6 +210,7 @@ ajaxRouter.put('/cart/items/:item_id', (req, res, next) => {
 	const item_id = req.params.item_id;
 	const item = req.body;
 	if (order_id && item_id) {
+		// This needs to not be a strict update as we're trusting whatever the customer is sending us as JSON in the req body
 		api.orders.items
 			.update(order_id, item_id, item)
 			.then(cartResponse => fillCartItems(cartResponse))
@@ -228,25 +239,30 @@ ajaxRouter.put('/cart/checkout', (req, res, next) => {
 
 ajaxRouter.put('/cart', async (req, res, next) => {
 	const cartData = req.body;
-	const {
-		shipping_address: shippingAddress,
-		billing_address: billingAddress
-	} = cartData;
-	const orderId = req.signedCookies.order_id;
-	if (orderId) {
-		if (shippingAddress) {
-			await api.orders.updateShippingAddress(orderId, shippingAddress);
-		}
-		if (billingAddress) {
-			await api.orders.updateBillingAddress(orderId, billingAddress);
-		}
+	// Checking the JSON body being PUT to the server
+	if (cartPutSchema.validate(cartData)) {
+		const {
+			shipping_address: shippingAddress,
+			billing_address: billingAddress
+		} = cartData;
+		const orderId = req.signedCookies.order_id;
+		if (orderId) {
+			if (shippingAddress) {
+				await api.orders.updateShippingAddress(orderId, shippingAddress);
+			}
+			if (billingAddress) {
+				await api.orders.updateBillingAddress(orderId, billingAddress);
+			}
 
-		await api.orders
-			.update(orderId, cartData)
-			.then(cartResponse => fillCartItems(cartResponse))
-			.then(({ status, json }) => {
-				res.status(status).send(json);
-			});
+			await api.orders
+				.update(orderId, cartData)
+				.then(cartResponse => fillCartItems(cartResponse))
+				.then(({ status, json }) => {
+					res.status(status).send(json);
+				});
+		} else {
+			res.end();
+		}
 	} else {
 		res.end();
 	}
@@ -311,7 +327,7 @@ ajaxRouter.get('/pages/:id', (req, res, next) => {
 
 ajaxRouter.get('/sitemap', async (req, res, next) => {
 	let result = null;
-	let filter = req.query;
+	const filter = req.query;
 	filter.enabled = true;
 
 	const sitemapResponse = await api.sitemap.retrieve(req.query);
